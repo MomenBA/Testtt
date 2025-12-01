@@ -128,6 +128,6 @@ st.subheader("📸 Start Camera")
 webrtc_streamer(
     key="sign_lang",
     video_transformer_factory=SignLanguageTransformer,
-    media_stream_constraints={"video": True, "audio": False"},
+    media_stream_constraints={"video": True, "audio": False},
 )
 
