@@ -1,120 +1,133 @@
+import streamlit as st
+import av
 import cv2
 import mediapipe as mp
 import numpy as np
 import time
-import warnings
-import pyttsx3
+from gtts import gTTS
+from io import BytesIO
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 from tensorflow.keras.models import load_model
-import traceback
 
-warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
 
-# Initialize the text-to-speech engine
-engine = pyttsx3.init()
+# -------------------------------
+# Streamlit UI
+# -------------------------------
+st.set_page_config(page_title="Sign Language Recognition", layout="wide")
+st.title("🤟 Sign Language Recognition with gTTS Audio")
 
-# Load the model
-model = load_model('model_Tensorflow_new.keras')
 
-# Initialize the video capture
-cap = cv2.VideoCapture(0)
+# Load Model
+model = load_model("model_Tensorflow_new.keras")
 
-# Setup MediaPipe hands module
+# MediaPipe
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
-hands = mp_hands.Hands(static_image_mode=False, min_detection_confidence=0.5, max_num_hands=1)
 
-# Define the sign language labels
+# Labels
 labels_dict = {i: chr(65 + i) for i in range(26)}
 labels_dict.update({26: "Space", 27: "DEL", 28: "please", 29: "Hello"})
 
-sign_string = ""
-letter_confirmation_time = 1
-current_letter = None
-letter_start_time = None
+# Streaming audio output
+audio_placeholder = st.empty()
 
-while True:
-    try:
-        ret, frame = cap.read()
-        if not ret:
-            break
 
+# -------------------------------
+# Function: Convert text to speech
+# -------------------------------
+def speak_text(text):
+    tts = gTTS(text=text, lang="en")
+    audio_bytes = BytesIO()
+    tts.write_to_fp(audio_bytes)
+    audio_placeholder.audio(audio_bytes.getvalue(), format="audio/mp3")
+
+
+# -------------------------------
+# Video transformer class
+# -------------------------------
+class SignLanguageTransformer(VideoTransformerBase):
+    def __init__(self):
+        self.hands = mp_hands.Hands(static_image_mode=False, min_detection_confidence=0.5, max_num_hands=1)
+        self.sign_string = ""
+        self.current_letter = None
+        self.letter_start_time = None
+        self.letter_confirmation_time = 1  # seconds
+
+    def predict_sign(self, frame):
         H, W, _ = frame.shape
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        results = hands.process(frame_rgb)
+        results = self.hands.process(frame_rgb)
 
         if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                try:
-                    x_, y_ = [], []
-                    data_aux = []
-                    for i in range(len(hand_landmarks.landmark)):
-                        x_.append(hand_landmarks.landmark[i].x)
-                        y_.append(hand_landmarks.landmark[i].y)
+            hand_landmarks = results.multi_hand_landmarks[0]
+            x_, y_, data_aux = [], [], []
 
-                    for i in range(len(hand_landmarks.landmark)):
-                        data_aux.append(hand_landmarks.landmark[i].x - min(x_))
-                        data_aux.append(hand_landmarks.landmark[i].y - min(y_))
-                
-                    # Ensure the length of data_aux is 42
-                    if len(data_aux) < 42:
-                        data_aux += [0] * (42 - len(data_aux))
-                    elif len(data_aux) > 42:
-                        data_aux = data_aux[:42]
+            for i in range(21):
+                x_.append(hand_landmarks.landmark[i].x)
+                y_.append(hand_landmarks.landmark[i].y)
 
-                    input_data = np.expand_dims(np.array(data_aux), axis=-1)
-                    input_data = np.expand_dims(input_data, axis=0)
+            for i in range(21):
+                data_aux.append(hand_landmarks.landmark[i].x - min(x_))
+                data_aux.append(hand_landmarks.landmark[i].y - min(y_))
 
-                    prediction = model.predict(input_data)
-                    predicted_index = np.argmax(prediction)
-                    predicted_character = labels_dict.get(predicted_index, "?")
+            # Ensure length is 42
+            if len(data_aux) < 42:
+                data_aux += [0] * (42 - len(data_aux))
 
-                    # Confirmation logic for letter detection
-                    if predicted_character == current_letter:
-                        if time.time() - letter_start_time > letter_confirmation_time:
-                            if current_letter == "DEL":
-                                sign_string = sign_string[:-1]
-                            elif current_letter == "Space":
-                                sign_string += " "
-                            elif current_letter in ["please", "Hello"]:
-                                sign_string += f" {current_letter} "
-                            else:
-                                sign_string += current_letter
-                            current_letter = None
+            data_aux = data_aux[:42]
+
+            input_data = np.expand_dims(np.array(data_aux), axis=-1)
+            input_data = np.expand_dims(input_data, axis=0)
+
+            prediction = model.predict(input_data)
+            predicted_index = np.argmax(prediction)
+            predicted_char = labels_dict.get(predicted_index, "?")
+
+            # Letter confirmation
+            if predicted_char == self.current_letter:
+                if time.time() - self.letter_start_time > self.letter_confirmation_time:
+                    if self.current_letter == "DEL":
+                        self.sign_string = self.sign_string[:-1]
+                    elif self.current_letter == "Space":
+                        self.sign_string += " "
                     else:
-                        current_letter = predicted_character
-                        letter_start_time = time.time()
+                        self.sign_string += self.current_letter
 
-                    # Display predicted character on the frame
-                    x1 = int(min(x_) * W) - 10
-                    y1 = int(min(y_) * H) - 10
-                    cv2.putText(frame, predicted_character, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 255, 0), 3)
+                    # 🔥 Call gTTS to speak the letter
+                    speak_text(self.current_letter)
 
-                    # Speak the predicted character
-                    if current_letter and time.time() - letter_start_time < letter_confirmation_time:
-                        engine.say(predicted_character)
-                        engine.runAndWait()
+                    self.current_letter = None
+            else:
+                self.current_letter = predicted_char
+                self.letter_start_time = time.time()
 
-                except Exception as e:
-                    print(f"Inner exception: {e}")
-                    traceback.print_exc()
+            # Draw prediction
+            x1 = int(min(x_) * W)
+            y1 = int(min(y_) * H)
+            cv2.putText(frame, predicted_char, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 255, 0), 3)
 
-        # Display the current text on the frame
-        cv2.putText(frame, f"Current Text: {sign_string}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-        cv2.imshow('Sign Language Recognition', frame)
-        
-        # Key press handling
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('d') and sign_string:
-            sign_string = sign_string[:-1]
-        elif key == ord('q'):
-            print("Final sign string:", sign_string)
-            break
+        return frame
 
-    except Exception as e:
-        print("Error:", e)
-        traceback.print_exc()
+    def transform(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        img = self.predict_sign(img)
 
-cap.release()
-cv2.destroyAllWindows()
+        cv2.putText(img, f"Current Text: {self.sign_string}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    1, (255, 0, 0), 2)
+
+        return img
+
+
+# -------------------------------
+# Camera Stream
+# -------------------------------
+st.subheader("📸 Start Camera")
+
+webrtc_streamer(
+    key="sign_lang",
+    video_transformer_factory=SignLanguageTransformer,
+    media_stream_constraints={"video": True, "audio": False"},
+)
+
